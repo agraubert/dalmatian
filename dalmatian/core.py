@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 import multiprocessing as mp
 import argparse
+from agutil.parallel import parallelize
 
 from .__about__ import __version__
 
@@ -230,6 +231,42 @@ class WorkspaceManager(object):
         buf.close()
         assert s.status_code==200
         print('Succesfully imported participants.')
+
+
+    def upload_data(self, samples, transpose=True):
+        """
+        Upload samples stored as an array of dicts into a workspace
+        samples = [{sample_id:..., participant_id:..., key:val, etc}]
+        If transpose is false, samples is taken as a dict of arrays:
+        samples = {sample_id:[...], participant_id:[...], key:[...], etc}
+        """
+        if transpose:
+            assert 'sample_id' in samples[0], "sample_id not defined in samples array"
+            assert 'participant_id' in samples[0], "participant_id not defined in samples array"
+            data = {'participant_id':[]}
+            index = []
+            for sample in samples:
+                for key,value in sample.items():
+                    if key == 'sample_id':
+                        index.append(value)
+                    elif key not in data:
+                        data[key] = [value]
+                    else:
+                        data[key].append(value)
+        else:
+            assert 'sample_id' in samples, "sample_id not defined in samples dict"
+            assert 'participant_id' in samples, "participant_id not defined in samples dict"
+            data = {
+                key:[val for val in entries] for key,entries in samples.items() if key != 'sample_id'
+            }
+            index = [entry for entry in samples['sample_id']]
+        df = pd.DataFrame(
+            index=index,
+            data=data,
+            columns=['participant_id']+[col for col in data if col != 'participant_id']
+        )
+        df.index.name = 'sample_id'
+        self.upload_samples(df, add_participant_samples=True)
 
 
     def update_participant_samples(self):
@@ -662,11 +699,18 @@ class WorkspaceManager(object):
         # for successful jobs, get metadata and count attempts
         status_df = status_df[status_df['status']=='Succeeded'].copy()
         metadata_dict = {}
-        for k,(i,row) in enumerate(status_df.iterrows()):
-            print('\rFetching metadata {}/{}'.format(k+1,status_df.shape[0]), end='')
+
+        @parallelize
+        def fetch_workflow_metadata(data):
+            k, (i, row) = data
             metadata = firecloud.api.get_workflow_metadata(self.namespace, self.workspace, row['submission_id'], row['workflow_id'])
-            assert metadata.status_code==200
-            metadata_dict[i] = metadata.json()
+            assert metadata.status_code == 200
+            return (k, i, metadata.json())
+
+        for (k, i, data) in fetch_workflow_metadata(enumerate(status_df.iterrows())):
+            print('\rFetching metadata {}/{}'.format(k+1,status_df.shape[0]), end='')
+            metadata_dict[i] = data
+        print('\r')
 
         # if workflow_name is None:
             # split output by workflow
