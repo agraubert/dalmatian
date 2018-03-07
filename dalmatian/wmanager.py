@@ -479,9 +479,9 @@ class WorkspaceManager(object):
 
         # get status of last run submission
         entity_dict = {}
-        for k,s in enumerate(submissions, 1):
-            print('\rFetching submission {}/{}'.format(k, len(submissions)), end='')
-            if s['submissionEntity']['entityType']!=etype:
+        for k,s in enumerate(submissions):
+            print('\rFetching submission {}/{}'.format(k+1, len(submissions)), end='')
+            if etype is not None and s['submissionEntity']['entityType']!=etype:
                 print('\rIncompatible submission entity type: {}'.format(
                     s['submissionEntity']['entityType']))
                 print('\rSkipping : '+ s['submissionId'])
@@ -503,7 +503,7 @@ class WorkspaceManager(object):
                         entity_dict[entity_id]['workflow_id'] = 'NA'
         print()
         status_df = pd.DataFrame(entity_dict).T
-        status_df.index.name = etype+'_id'
+        status_df.index.name = (etype if etype is not None else 'entity')+'_id'
 
         return status_df[['status', 'timestamp', 'workflow_id', 'submission_id', 'configuration']]
 

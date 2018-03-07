@@ -334,7 +334,7 @@ def cmd_add_workspace(args):
 def cmd_stats(args):
     try:
         print("Retrieving submission history...")
-        sample_status = args.workspace.get_sample_status(args.configuration)
+        sample_status = args.workspace.get_entity_status(None, args.configuration)
         print("Configuration name: ", np.unique(sample_status['configuration']))
         print("Gathering latest submission data...")
         status,_ = args.workspace.get_stats(sample_status)
