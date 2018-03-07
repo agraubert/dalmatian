@@ -715,7 +715,7 @@ class WorkspaceManager(object):
         status_df = status_df[status_df['status']=='Succeeded'].copy()
         metadata_dict = {}
 
-        @parallelize
+        @parallelize(maximum=10)
         def fetch_workflow_metadata(data):
             k, (i, row) = data
             while True:
