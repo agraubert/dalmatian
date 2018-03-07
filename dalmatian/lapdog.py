@@ -24,6 +24,30 @@ def load_data():
     except FileNotFoundError:
         return {}
 
+def workspaceType(text):
+    """
+    Text should either be a lapdog workspace name (no '/')
+    or a firecloud namespace/workspace path
+    """
+    data = load_data()
+
+    if 'workspaces' not in data:
+        data['workspaces'] = {}
+
+    if '/' not in text:
+        if text not in data['workspaces']:
+            sys.exit("Workspace '%s' is not recognized" % text)
+
+        return dalmatian.WorkspaceManager(
+            data['workspaces'][text]['namespace'],
+            data['workspaces'][text]['workspace']
+        )
+    else:
+        namespace,workspace = text.split('/')
+        return dalmatian.WorkspaceManager(
+            namespace, workspace
+        )
+
 @parallelize2()
 def upload(bucket, path, source):
     blob = bucket.blob(path)
@@ -34,7 +58,9 @@ def main():
     parent = argparse.ArgumentParser(add_help=False)
     parent.add_argument(
         'workspace',
-        help="Workspace name in lapdog (see workspace subcommand)",
+        type=workspaceType,
+        help="Lapdog workspace alias (see workspace subcommand)\n"
+        "Or Firecloud workspace in 'namespace/workspace' format",
     )
 
     parser = argparse.ArgumentParser(
@@ -65,6 +91,7 @@ def main():
     ws_parser.add_argument(
         '-c', '--create',
         nargs='?',
+        type=workspaceType,
         help="Create a new workspace. Default behavior without this flag is to"
         " fail if the workspace doesn't already exist in firecloud. You can "
         "optionally provide the name of a workspace (in lapdog) as an argument"
@@ -269,6 +296,10 @@ def cmd_add_workspace(args):
     if args.workspace in data['workspaces']:
         sys.exit('This workspace already exists')
 
+    for name in [args.workspace] + args.alias:
+        if '/' in name:
+            sys.exit("Workspace name '%s' cannot contain '/'" % name)
+
     valid = [alias for alias in args.alias if alias not in data['workspaces']]
     if len(args.alias) and not len(valid):
         sys.exit('None of the provided aliases were available')
@@ -287,16 +318,8 @@ def cmd_add_workspace(args):
         sys.exit("This workspace does not exist. Use the --create flag to create a new one")
 
     if args.create is not False:
-        if args.create is not None:
-            if args.create not in data['workspaces']:
-                sys.exit("Workspace '%s' is not recognized" % args.create)
-            source = dalmatian.WorkspaceManager(
-                data['workspaces'][args.create]['namespace'],
-                data['workspaces'][args.create]['workspace']
-            )
-        else:
-            source = None
-        ws.create_workspace(wm=source)
+        #args.create will either be a workspace type or None
+        ws.create_workspace(wm=args.create)
     data = load_data()
     if 'workspaces' not in data:
         data['workspaces'] = {}
@@ -309,25 +332,12 @@ def cmd_add_workspace(args):
         json.dump(data, writer, indent='\t')
 
 def cmd_stats(args):
-    data = load_data()
-
-    if 'workspaces' not in data:
-        data['workspaces'] = {}
-
-    if args.workspace not in data['workspaces']:
-        sys.exit("Workspace '%s' is not recognized" % args.workspace)
-
-    ws = dalmatian.WorkspaceManager(
-        data['workspaces'][args.workspace]['namespace'],
-        data['workspaces'][args.workspace]['workspace']
-    )
-
     try:
         print("Retrieving submission history...")
-        sample_status = ws.get_sample_status(args.configuration)
+        sample_status = args.workspace.get_sample_status(args.configuration)
         print("Configuration name: ", np.unique(sample_status['configuration']))
         print("Gathering latest submission data...")
-        status,_ = ws.get_stats(sample_status)
+        status,_ = args.workspace.get_stats(sample_status)
         for sample, row in status.iterrows():
             if row.status != 'Succeeded':
                 print(sample,row.status)
@@ -347,19 +357,6 @@ def cmd_upload(args):
     " or a dict of arrays. In either JSON schema, the dicts must contain "
     "sample_id and participant_id fields."
 
-    data = load_data()
-
-    if 'workspaces' not in data:
-        data['workspaces'] = {}
-
-    if args.workspace not in data['workspaces']:
-        sys.exit("Workspace '%s' is not recognized" % args.workspace)
-
-    ws = dalmatian.WorkspaceManager(
-        data['workspaces'][args.workspace]['namespace'],
-        data['workspaces'][args.workspace]['workspace']
-    )
-
     if args.source.name.endswith('.csv') or args.source.name.endswith('.tsv'):
         reader = csv.DictReader(
             args.source,
@@ -370,7 +367,7 @@ def cmd_upload(args):
         if args.files:
             samples = []
             pending_uploads = []
-            bucket = storage.Client().get_bucket(ws.get_bucket_id())
+            bucket = storage.Client().get_bucket(args.workspace.get_bucket_id())
             (root, ext) = os.path.splitext(args.source.name)
             with open(root+'.lapdog'+ext, 'w') as w:
                 writer = csv.DictWriter(w, reader.fieldnames, delimiter=reader.delimiter, lineterminator='\n')
@@ -382,7 +379,7 @@ def cmd_upload(args):
                                 os.path.basename(v)
                             )
                             gs_path = 'gs://%s/%s' % (
-                                ws.get_bucket_id(),
+                                args.workspace.get_bucket_id(),
                                 bucket_path
                             )
                             print("Uploading", v, "to", gs_path)
@@ -394,14 +391,14 @@ def cmd_upload(args):
         else:
             samples = list(reader)
 
-        ws.upload_data(samples)
+        args.workspace.upload_data(samples)
     elif args.source.name.endswith('.json'):
         souce = json.load(args.source)
         if type(source) == list and type(souce[0]) == dict and 'sample_id' in source[0] and 'participant_id' in source[0]:
             #standard
             if args.files:
                 pending_uploads = []
-                bucket = storage.Client().get_bucket(ws.get_bucket_id())
+                bucket = storage.Client().get_bucket(args.workspace.get_bucket_id())
                 for i in len(source):
                     sample = source[i]
                     for k,v in sample.items():
@@ -411,7 +408,7 @@ def cmd_upload(args):
                                 os.path.basename(v)
                             )
                             gs_path = 'gs://%s/%s' % (
-                                ws.get_bucket_id(),
+                                args.workspace.get_bucket_id(),
                                 bucket_path
                             )
                             print("Uploading", v, "to", gs_path)
@@ -421,11 +418,11 @@ def cmd_upload(args):
                 with open(root+'.lapdog'+ext, 'w') as w:
                     json.dump(source, w, indent='\t')
                 _ = [callback() for callback in status_bar.iter(pending_uploads)]
-            ws.upload_data(source)
+            args.workspace.upload_data(source)
         elif type(source) == dict and type(source[[k for k in source][0]]) == list and 'sample_id' in source and 'participant_id' in source:
             if args.files:
                 pending_uploads = []
-                bucket = storage.Client().get_bucket(ws.get_bucket_id())
+                bucket = storage.Client().get_bucket(args.workspace.get_bucket_id())
                 for key in source:
                     for i in range(len(source[key])):
                         entry = source[key][i]
@@ -435,7 +432,7 @@ def cmd_upload(args):
                                 os.path.basename(entry)
                             )
                             gs_path = 'gs://%s/%s' % (
-                                ws.get_bucket_id(),
+                                args.workspace.get_bucket_id(),
                                 bucket_path
                             )
                             print("Uploading", entry, "to", gs_path)
@@ -447,7 +444,7 @@ def cmd_upload(args):
                 with open(root+'.lapdog'+ext, 'w') as w:
                     json.dump(source, w, indent='\t')
                 _ = [callback() for callback in status_bar.iter(pending_uploads)]
-            ws.upload_data(source, transpose=False)
+            args.workspace.upload_data(source, transpose=False)
     else:
         sys.exit("Please use a .tsv, .csv, or .json file")
 
@@ -455,56 +452,32 @@ def cmd_method(args):
     if args.wdl is None and args.config is None:
         sys.exit("Must provide either a method or configuration")
 
-    data = load_data()
-
-    if 'workspaces' not in data:
-        data['workspaces'] = {}
-
-    if args.workspace not in data['workspaces']:
-        sys.exit("Workspace '%s' is not recognized" % args.workspace)
-
-    ws = dalmatian.WorkspaceManager(
-        data['workspaces'][args.workspace]['namespace'],
-        data['workspaces'][args.workspace]['workspace']
-    )
-
     if args.wdl:
         name = args.method_name if args.method_name is not None else os.path.splitext(os.path.basename(args.wdl.name))[0]
         dalmatian.update_method(
-            ws.namespace,
+            args.workspace.namespace,
             name,
             "Runs " + name,
             args.wdl.name
         )
     if args.config:
-        ws.update_configuration(json.load(args.config))
+        args.workspace.update_configuration(json.load(args.config))
 
 
 def cmd_attrs(args):
-    data = load_data()
 
-    if 'workspaces' not in data:
-        data['workspaces'] = {}
-
-    if args.workspace not in data['workspaces']:
-        sys.exit("Workspace '%s' is not recognized" % args.workspace)
-
-    ws = dalmatian.WorkspaceManager(
-        data['workspaces'][args.workspace]['namespace'],
-        data['workspaces'][args.workspace]['workspace']
-    )
     source = json.load(args.source)
     if type(source) != dict:
         sys.exit("The root object must be a dictionary")
     if args.files:
         pending_uploads = []
-        bucket = storage.Client().get_bucket(ws.get_bucket_id())
+        bucket = storage.Client().get_bucket(args.workspace.get_bucket_id())
         source, pending_uploads = walk_and_upload(bucket, source)
         (root, ext) = os.path.splitext(args.source.name)
         with open(root+'.lapdog'+ext, 'w') as w:
             json.dump(source, w, indent='\t')
         _ = [callback() for callback in status_bar.iter(pending_uploads)]
-    ws.update_attributes(source)
+    args.workspace.update_attributes(source)
 
 
 def walk_and_upload(bucket, obj):
@@ -544,24 +517,11 @@ def walk_and_upload(bucket, obj):
 
 
 def cmd_run(args):
-    data = load_data()
-
-    if 'workspaces' not in data:
-        data['workspaces'] = {}
-
-    if args.workspace not in data['workspaces']:
-        sys.exit("Workspace '%s' is not recognized" % args.workspace)
-
-    ws = dalmatian.WorkspaceManager(
-        data['workspaces'][args.workspace]['namespace'],
-        data['workspaces'][args.workspace]['workspace']
-    )
-
     configs = {
         config['name']:config for config in
         dalmatian.firecloud.api.list_workspace_configs(
-            ws.namespace,
-            ws.workspace
+            args.workspace.namespace,
+            args.workspace.workspace
         ).json()
     }
     if args.config not in configs:
@@ -572,7 +532,7 @@ def cmd_run(args):
         sys.exit("Configuration '%s' does not exist" % args.config)
     args.config = configs[args.config]
     etype = args.expression[0] if args.expression is not None else args.config['rootEntityType']
-    entities_df = ws.get_entities(etype)
+    entities_df = args.workspace.get_entities(etype)
     try:
         entity = entities_df.loc[args.entity]
     except KeyError:
@@ -580,6 +540,7 @@ def cmd_run(args):
             etype.title(),
             args.entity
         ))
+    data = load_data()
     tmp_id = 'tmp::'+md5(str(time.time()).encode()).hexdigest()
     if 'submissions' in data:
         while tmp_id in data['submissions']:
@@ -612,8 +573,8 @@ def cmd_run(args):
             )
             args.after = data['submissions'][args.after]
         response = dalmatian.firecloud.api.get_submission(
-            ws.namespace,
-            ws.workspace,
+            args.workspace.namespace,
+            args.workspace.workspace,
             args.after
         )
         if response.status_code not in {200,201}:
@@ -639,8 +600,8 @@ def cmd_run(args):
                     time.sleep(1800)
                 count += 1
                 response = dalmatian.firecloud.api.get_submission(
-                    ws.namespace,
-                    ws.workspace,
+                    args.workspace.namespace,
+                    args.workspace.workspace,
                     args.after
                 )
                 if response.status_code not in {200,201}:
@@ -653,7 +614,7 @@ def cmd_run(args):
         if not succeeded:
             sys.exit("The provided workflow ID has failed")
     print("Creating submission")
-    result = ws.create_submission(
+    result = args.workspace.create_submission(
         args.config['namespace'],
         args.config['name'],
         args.entity,
@@ -671,19 +632,7 @@ def cmd_run(args):
         json.dump(data, writer, indent='\t')
 
 def cmd_submissions(args):
-    data = load_data()
-
-    if 'workspaces' not in data:
-        data['workspaces'] = {}
-
-    if args.workspace not in data['workspaces']:
-        sys.exit("Workspace '%s' is not recognized" % args.workspace)
-
-    ws = dalmatian.WorkspaceManager(
-        data['workspaces'][args.workspace]['namespace'],
-        data['workspaces'][args.workspace]['workspace']
-    )
-    submissions = ws.get_submission_status(filter_active=args.done)
+    submissions = args.workspace.get_submission_status(filter_active=args.done)
     if args.id:
         submissions=submissions[
             submissions['submission_id']==args.id
@@ -699,22 +648,10 @@ def cmd_submissions(args):
     print(submissions)
 
 def cmd_configs(args):
-    data = load_data()
-
-    if 'workspaces' not in data:
-        data['workspaces'] = {}
-
-    if args.workspace not in data['workspaces']:
-        sys.exit("Workspace '%s' is not recognized" % args.workspace)
-
-    ws = dalmatian.WorkspaceManager(
-        data['workspaces'][args.workspace]['namespace'],
-        data['workspaces'][args.workspace]['workspace']
-    )
 
     print("Configurations in this workspace:")
     print("Configuration\tSynopsis")
-    for config in dalmatian.firecloud.api.list_workspace_configs(ws.namespace, ws.workspace).json():
+    for config in dalmatian.firecloud.api.list_workspace_configs(args.workspace.namespace, args.workspace.workspace).json():
         config_data = dalmatian.firecloud.api.get_repository_method(
             config['methodRepoMethod']['methodNamespace'],
             config['methodRepoMethod']['methodName'],
@@ -757,20 +694,8 @@ def cmd_list(args):
                 first = False
 
 def cmd_info(args):
-    data = load_data()
 
-    if 'workspaces' not in data:
-        data['workspaces'] = {}
-
-    if args.workspace not in data['workspaces']:
-        sys.exit("Workspace '%s' is not recognized" % args.workspace)
-
-    ws = dalmatian.WorkspaceManager(
-        data['workspaces'][args.workspace]['namespace'],
-        data['workspaces'][args.workspace]['workspace']
-    )
-
-    submissions = ws.get_submission_status()
+    submissions = args.workspace.get_submission_status()
     bins = {}
     for row in submissions.iterrows():
         entity = row[0]
@@ -783,7 +708,7 @@ def cmd_info(args):
             bins[row.status][row.configuration].append((row.submission_id, entity))
 
     print("Lapdog Workspace:",args.workspace)
-    print("Firecloud Workspace:", '%s/%s' % (ws.namespace, ws.workspace))
+    print("Firecloud Workspace:", '%s/%s' % (args.workspace.namespace, args.workspace.workspace))
     print("Submissions:")
     for status in bins:
         print(status,sum(len(item) for item in bins[status].values()),"submission(s):")
