@@ -9,6 +9,7 @@ import firecloud.api
 from firecloud import fiss
 import iso8601
 import pytz
+from agutil.parallel import parallelize
 from datetime import datetime
 from .core import *
 
@@ -224,6 +225,41 @@ class WorkspaceManager(object):
             print('  * The FireCloud data model currently does not provide participant.samples\n',
                   '    Adding "participant.samples_" as an explicit attribute.', sep='')
             self.update_participant_entities('sample')
+
+    def upload_data(self, samples, transpose=True):
+        """
+        Upload samples stored as an array of dicts into a workspace
+        samples = [{sample_id:..., participant_id:..., key:val, etc}]
+        If transpose is false, samples is taken as a dict of arrays:
+        samples = {sample_id:[...], participant_id:[...], key:[...], etc}
+        """
+        if transpose:
+            assert 'sample_id' in samples[0], "sample_id not defined in samples array"
+            assert 'participant_id' in samples[0], "participant_id not defined in samples array"
+            data = {'participant_id':[]}
+            index = []
+            for sample in samples:
+                for key,value in sample.items():
+                    if key == 'sample_id':
+                        index.append(value)
+                    elif key not in data:
+                        data[key] = [value]
+                    else:
+                        data[key].append(value)
+        else:
+            assert 'sample_id' in samples, "sample_id not defined in samples dict"
+            assert 'participant_id' in samples, "participant_id not defined in samples dict"
+            data = {
+                key:[val for val in entries] for key,entries in samples.items() if key != 'sample_id'
+            }
+            index = [entry for entry in samples['sample_id']]
+        df = pd.DataFrame(
+            index=index,
+            data=data,
+            columns=['participant_id']+[col for col in data if col != 'participant_id']
+        )
+        df.index.name = 'sample_id'
+        self.upload_samples(df, add_participant_samples=True)
 
 
     def update_participant_entities(self, etype):
@@ -678,16 +714,21 @@ class WorkspaceManager(object):
         # for successful jobs, get metadata and count attempts
         status_df = status_df[status_df['status']=='Succeeded'].copy()
         metadata_dict = {}
-        for k,(i,row) in enumerate(status_df.iterrows(), 1):
-            print('\rFetching metadata {}/{}'.format(k,status_df.shape[0]), end='')
-            fetch = True
-            while fetch:  # improperly dealing with 500s here...
+
+        @parallelize
+        def fetch_workflow_metadata(data):
+            k, (i, row) = data
+            while True:
                 try:
                     metadata = self.get_workflow_metadata(row['submission_id'], row['workflow_id'])
-                    metadata_dict[i] = metadata.json()
-                    fetch = False
+                    return (k, i, metadata.json())
                 except:
                     pass
+
+        for (k, i, data) in fetch_workflow_metadata(enumerate(status_df.iterrows())):
+            print('\rFetching metadata {}/{}'.format(k+1,status_df.shape[0]), end='')
+            metadata_dict[i] = data
+        print('\r')
 
         # if workflow_name is None:
             # split output by workflow
@@ -1120,7 +1161,7 @@ class WorkspaceManager(object):
 
 
     #-------------------------------------------------------------------------
-    #  
+    #
     #-------------------------------------------------------------------------
     def find_sample_set(self, sample_id, sample_set_df=None):
         """Find sample set(s) containing sample"""
