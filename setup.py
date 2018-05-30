@@ -20,7 +20,8 @@ setup(
     long_description = _LONG_DESCRIPTION,
     entry_points = {
         'console_scripts': [
-            'dalmatian = dalmatian.core:main'
+            'dalmatian = dalmatian.core:main',
+            'lapdog = dalmatian.lapdog:main'
         ]
     },
     install_requires = [

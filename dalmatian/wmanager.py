@@ -1350,5 +1350,6 @@ class WorkspaceManager(object):
             cnamespace, config, entity, etype, expression=expression, use_callcache=use_callcache)
         if r.status_code==201:
             print('Successfully created submission {}.'.format(r.json()['submissionId']))
+            return r.json()['submissionId']
         else:
             print(r.text)

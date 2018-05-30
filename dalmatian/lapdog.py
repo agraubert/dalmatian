@@ -370,7 +370,8 @@ def cmd_upload(args):
             bucket = storage.Client().get_bucket(args.workspace.get_bucket_id())
             (root, ext) = os.path.splitext(args.source.name)
             with open(root+'.lapdog'+ext, 'w') as w:
-                writer = csv.DictWriter(w, reader.fieldnames, delimiter=reader.delimiter, lineterminator='\n')
+                writer = csv.DictWriter(w, reader.fieldnames, delimiter='\t' if args.source.name.endswith('.tsv') else ',', lineterminator='\n')
+                writer.writeheader()
                 for sample in reader:
                     for k,v in sample.items():
                         if os.path.isfile(v):
@@ -635,15 +636,15 @@ def cmd_submissions(args):
     submissions = args.workspace.get_submission_status(filter_active=args.done)
     if args.id:
         submissions=submissions[
-            submissions['submission_id']==args.id
+            submissions['submission_id'] == args.id
         ]
     if args.config:
         submissions=submissions[
-            submissions['configuration']==args.config
+            submissions['configuration'] == args.config
         ]
     if args.entity:
         submissions=submissions[
-            submissions.index==args.entity
+            submissions.index == args.entity
         ]
     print(submissions)
 
@@ -674,9 +675,9 @@ def cmd_list(args):
         namespace = workspace['namespace']
         workspace = workspace['workspace']
         if namespace not in workspaces:
-            workspaces[namespace]={workspace:[alias]}
+            workspaces[namespace] = {workspace: [alias]}
         elif workspace not in workspaces[namespace]:
-            workspaces[namespace][workspace]=[alias]
+            workspaces[namespace][workspace] = [alias]
         else:
             workspaces[namespace][workspace].append(alias)
 
@@ -707,7 +708,7 @@ def cmd_info(args):
         else:
             bins[row.status][row.configuration].append((row.submission_id, entity))
 
-    print("Lapdog Workspace:",args.workspace)
+    # print("Lapdog Workspace:",args.workspace)
     print("Firecloud Workspace:", '%s/%s' % (args.workspace.namespace, args.workspace.workspace))
     print("Submissions:")
     for status in bins:
