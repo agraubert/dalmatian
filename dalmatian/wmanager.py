@@ -344,6 +344,15 @@ class WorkspaceManager(object):
             attrs = pd.DataFrame(attrs, index=[sample_id])
         self.update_entity_attributes('sample', attrs)
 
+    def set_sample_set_attributes(self, sample_set_id, **attrs):
+        self.update_entity_attributes(
+            'sample_set',
+            pd.DataFrame(
+                attrs,
+                index=[sample_set_id]
+            )
+        )
+
 
     def update_sample_set_attributes(self, sample_set_id, attrs):
         """
@@ -357,10 +366,14 @@ class WorkspaceManager(object):
         self.delete_entity_attributes(self, 'sample_set', sample_set_id, attrs)
 
 
-    def update_attributes(self, attr_dict):
+    def update_attributes(self, attr_dict=None, **attrs):
         """
         Set or update workspace attributes. Wrapper for API 'set' call
         """
+        if attr_dict is None:
+            attr_dict = {}
+        if len(attrs):
+            attr_dict.update(attrs)
         # attrs must be list:
         attrs = [firecloud.api._attr_set(i,j) for i,j in attr_dict.items()]
         r = firecloud.api.update_workspace_attributes(self.namespace, self.workspace, attrs)
@@ -1231,7 +1244,7 @@ class WorkspaceManager(object):
         #         gs_delete(purge_paths, chunk_size=500)
 
 
-    def update_entity_attributes(self, etype, attrs):
+    def update_entity_attributes(self, etype, attrs, quiet=False):
         """
         Create or update entity attributes
 
@@ -1266,7 +1279,7 @@ class WorkspaceManager(object):
         # try rawls batch call if available
         r = _batch_update_entities(self.namespace, self.workspace, attr_list)
         # try:  # TODO
-        if r.status_code==204:
+        if r.status_code==204 and not quiet:
             if isinstance(attrs, pd.DataFrame):
                 print("Successfully updated attributes '{}' for {} {}s.".format(attrs.columns.tolist(), attrs.shape[0], etype))
             elif isinstance(attrs, pd.Series):
