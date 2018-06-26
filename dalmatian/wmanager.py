@@ -1279,13 +1279,14 @@ class WorkspaceManager(object):
         # try rawls batch call if available
         r = _batch_update_entities(self.namespace, self.workspace, attr_list)
         # try:  # TODO
-        if r.status_code==204 and not quiet:
-            if isinstance(attrs, pd.DataFrame):
-                print("Successfully updated attributes '{}' for {} {}s.".format(attrs.columns.tolist(), attrs.shape[0], etype))
-            elif isinstance(attrs, pd.Series):
-                print("Successfully updated attribute '{}' for {} {}s.".format(attrs.name, len(attrs), etype))
-            else:
-                print("Successfully updated attribute '{}' for {} {}s.".format(attrs.name, len(attrs), etype))
+        if r.status_code==204:
+            if not quiet:
+                if isinstance(attrs, pd.DataFrame):
+                    print("Successfully updated attributes '{}' for {} {}s.".format(attrs.columns.tolist(), attrs.shape[0], etype))
+                elif isinstance(attrs, pd.Series):
+                    print("Successfully updated attribute '{}' for {} {}s.".format(attrs.name, len(attrs), etype))
+                else:
+                    print("Successfully updated attribute '{}' for {} {}s.".format(attrs.name, len(attrs), etype))
         else:
             print(r.text)
         # except:  # revert to public API

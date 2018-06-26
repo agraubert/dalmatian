@@ -13,6 +13,7 @@ from hashlib import md5
 import time
 import tempfile
 import subprocess
+from datetime import datetime
 from itertools import repeat
 import re
 from io import StringIO
@@ -120,6 +121,28 @@ def main():
         type=workspaceType,
         help="Lapdog workspace alias (see workspace subcommand)\n"
         "Or Firecloud workspace in 'namespace/workspace' format",
+    )
+
+    exec_parent = argparse.ArgumentParser(add_help=False)
+    exec_parent.add_argument(
+        'config',
+        help="Configuration to run"
+    )
+    exec_parent.add_argument(
+        'entity',
+        help="The entity to run on. Entity is assumed to be of the same "
+        "type as the configuration's root entity type. If you would like to "
+        "run on a different entity type, use the --expression argument"
+    )
+    exec_parent.add_argument(
+        '-x', '--expression',
+        nargs=2,
+        help="If the entity provided is not the same as the root entity type of"
+        " the configuration, use this option to set a different entity type and"
+        " entity expression. This option takes two arguments provide "
+        "the new entity type followed by the expression for this entity",
+        metavar=("ENTITY_TYPE", "EXPRESSION"),
+        default=None
     )
 
     parser = argparse.ArgumentParser(
@@ -253,28 +276,13 @@ def main():
         'Execution will occur directly on GCP and outputs will be returned to firecloud',
         description='Executes a configuration outside of firecloud. '
         'Execution will occur directly on GCP and outputs will be returned to firecloud',
-        parents=[parent]
+        parents=[parent, exec_parent]
     )
     exec_parser.set_defaults(func=cmd_exec)
     exec_parser.add_argument(
-        'config',
-        help="Configuration to run"
-    )
-    exec_parser.add_argument(
-        'entity',
-        help="The entity to run on. Entity is assumed to be of the same "
-        "type as the configuration's root entity type. If you would like to "
-        "run on a different entity type, use the --expression argument"
-    )
-    exec_parser.add_argument(
-        '-x', '--expression',
-        nargs=2,
-        help="If the entity provided is not the same as the root entity type of"
-        " the configuration, use this option to set a different entity type and"
-        " entity expression. This option takes two arguments provide "
-        "the new entity type followed by the expression for this entity",
-        metavar=("ENTITY_TYPE", "EXPRESSION"),
-        default=None
+        '-z', '--zone',
+        help="Execution Zone to use. Default: 'us-east1-b'",
+        default='us-east1-b'
     )
 
     run_parser = subparsers.add_parser(
@@ -282,7 +290,7 @@ def main():
         aliases=['submit'],
         help='Submits a job to run in firecloud',
         description='Submits a job to run in firecloud',
-        parents=[exec_parser],
+        parents=[parent, exec_parent],
         conflict_handler='resolve'
     )
     run_parser.set_defaults(func=cmd_run)
@@ -984,6 +992,12 @@ def cmd_test(args):
     )
 
 
+def build_input_key(template):
+    data = ''
+    for k in sorted(template):
+        data += str(template[k])
+    return md5(data.encode()).hexdigest()
+
 def cmd_exec(args):
     # 1) resolve configuration
     configs = {
@@ -1062,7 +1076,6 @@ def cmd_exec(args):
     input()
 
     submission_data = {
-        'workflows':[],
         'workspace':args.workspace.workspace,
         'namespace':args.workspace.namespace,
         'config':args.config['name'],
@@ -1073,8 +1086,7 @@ def cmd_exec(args):
     }
 
     @parallelize(5)
-    def launch_workflow(args, submission_id, template, invalid, etype, entity):
-        workflow_id = submission_id[:8]+"-"+md5((str(time.time()) + args.config['name'] + entity).encode()).hexdigest()
+    def prepare_workflow(args, submission_id, template, invalid, etype, entity):
         workflow_template = {}
         for key, val in template.items():
             if key not in invalid:
@@ -1092,79 +1104,86 @@ def cmd_exec(args):
                 workflow_template[key] = resolution[0]
             else:
                 workflow_template[key] = resolution
-        tempdir = tempfile.TemporaryDirectory()
-        with open(os.path.join(tempdir.name, 'method.wdl'),'w') as w:
-            w.write(dalmatian.get_wdl(
-                args.config['methodRepoMethod']['methodNamespace'],
-                args.config['methodRepoMethod']['methodName']
-            ))
-        with open(os.path.join(tempdir.name, 'config.json'), 'w') as w:
-            json.dump(workflow_template, w, indent='\t')
-        with open(os.path.join(tempdir.name, 'options.json'), 'w') as w:
-            json.dump(
-                {
-                    'default_runtime_attributes': {
-                        'zones': 'us-east4-a',
-                        'labels': 'lapdog-submission-id={},lapdog-workflow-id={}'.format(submission_id, workflow_id)
-                    }
+
+        return workflow_template
+
+    tempdir = tempfile.TemporaryDirectory()
+    with open(os.path.join(tempdir.name, 'method.wdl'),'w') as w:
+        w.write(dalmatian.get_wdl(
+            args.config['methodRepoMethod']['methodNamespace'],
+            args.config['methodRepoMethod']['methodName']
+        ))
+    with open(os.path.join(tempdir.name, 'options.json'), 'w') as w:
+        json.dump(
+            {
+                'default_runtime_attributes': {
+                    'zones': args.zone,
                 },
-                w
-            )
-        # print("Debug info:")
-        # with open(os.path.join(tempdir.name, 'method.wdl')) as r:
-        #     print("WDL:", r.read()[:512])
-        # with open(os.path.join(tempdir.name, 'config.json')) as r:
-        #     print("Config:", r.read())
-        cmd = (
-            'gcloud alpha genomics pipelines run '
-            '--pipeline-file /Users/aarong/Documents/wdlparser/wdl/runners/cromwell_on_google/wdl_runner/wdl_pipeline.yaml '
-            '--zones {zone} '
-            '--inputs-from-file WDL={wdl_text} '
-            '--inputs-from-file WORKFLOW_INPUTS={workflow_template} '
-            '--inputs-from-file WORKFLOW_OPTIONS={options_template} '
-            '--inputs WORKSPACE=gs://{bucket_id}/lapdog-executions/{submission_id}/{workflow_id}/workspace '
-            '--inputs OUTPUTS=gs://{bucket_id}/lapdog-executions/{submission_id}/{workflow_id}/results '
-            '--logging gs://{bucket_id}/lapdog-executions/{submission_id}/{workflow_id}/logs '
-            # '--inputs WORKSPACE=gs://cga-aarong-resources/lapdog-executions/{submission_id}/{workflow_id}/workspace '
-            # '--inputs OUTPUTS=gs://cga-aarong-resources/lapdog-executions/{submission_id}/{workflow_id}/results '
-            # '--logging gs://cga-aarong-resources/lapdog-executions/{submission_id}/{workflow_id}/logs '
-            '--labels lapdog-submission-id={submission_id},lapdog-workflow-id={workflow_id} '
-            '--service-account-scopes=https://www.googleapis.com/auth/devstorage.full_control'
-        ).format(
-            zone='us-east4-a',
-            wdl_text=os.path.join(tempdir.name, 'method.wdl'),
-            workflow_template=os.path.join(tempdir.name, 'config.json'),
-            options_template=os.path.join(tempdir.name, 'options.json'),
-            bucket_id=args.workspace.get_bucket_id(),
-            submission_id=submission_id,
-            workflow_id=workflow_id
+                'write_to_cache': True,
+                'read_from_cache': True
+            },
+            w
         )
-        # print(cmd)
-        results = subprocess.run(
-            cmd, shell=True, executable='/bin/bash',
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-        ).stdout.decode()
-        time.sleep(10)
-        # print("RETURN:", results)
-        return {
-            'workflow_id': workflow_id,
-            'workflow_output':'gs://{}/lapdog-executions/{}/{}/results/wdl_run_metadata.json'.format(
-                args.workspace.get_bucket_id(),
-                submission_id,
-                workflow_id
-            ),
-            'workflow_entity': entity,
-            # 'operation_id': '<PLACEHOLDER>'
-            'operation_id': re.search(
-                r'(operations/\S+)\].',
-                results
-            ).group(1)
+
+    workflow_inputs = [*status_bar.iter(prepare_workflow(
+        repeat(args),
+        repeat(submission_id),
+        repeat(template),
+        repeat(invalid_inputs),
+        repeat(args.config['rootEntityType']),
+        workflow_entities
+    ), len(workflow_entities), prepend="Preparing Workflows... ")]
+
+    with open(os.path.join(tempdir.name, 'config.json'), 'w') as w:
+        json.dump(
+            workflow_inputs,
+            w,
+            # indent='\t'
+        )
+
+    submission_data['workflows'] = [
+        {
+            'entity':entity,
+            'key':build_input_key(template)
         }
+        for entity, template in zip(workflow_entities, workflow_inputs)
+    ]
 
-    for workflow_inputs in status_bar.iter(launch_workflow(repeat(args), repeat(submission_id), repeat(template), repeat(invalid_inputs), repeat(args.config['rootEntityType']), workflow_entities), len(workflow_entities), prepend="Launching workflows... "):
-        submission_data['workflows'].append(workflow_inputs)
+    cmd = (
+        'gcloud alpha genomics pipelines run '
+        '--pipeline-file /Users/aarong/Documents/wdl/runners/cromwell_on_google/wdl_runner/wdl_pipeline.yaml '
+        '--zones {zone} '
+        '--inputs-from-file WDL={wdl_text} '
+        '--inputs-from-file WORKFLOW_INPUTS={workflow_template} '
+        '--inputs-from-file WORKFLOW_OPTIONS={options_template} '
+        '--inputs LAPDOG_SUBMISSION_ID={submission_id} '
+        '--inputs WORKSPACE=gs://{bucket_id}/lapdog-executions/{submission_id}/workspace '
+        '--inputs OUTPUTS=gs://{bucket_id}/lapdog-executions/{submission_id}/results '
+        '--logging gs://{bucket_id}/lapdog-executions/{submission_id}/logs '
+        # '--inputs WORKSPACE=gs://cga-aarong-resources/lapdog-executions/{submission_id}/{workflow_id}/workspace '
+        # '--inputs OUTPUTS=gs://cga-aarong-resources/lapdog-executions/{submission_id}/{workflow_id}/results '
+        # '--logging gs://cga-aarong-resources/lapdog-executions/{submission_id}/{workflow_id}/logs '
+        '--labels lapdog-submission-id={submission_id},lapdog-execution-role=cromwell '
+        '--service-account-scopes=https://www.googleapis.com/auth/devstorage.read_write'
+    ).format(
+        zone=args.zone,
+        wdl_text=os.path.join(tempdir.name, 'method.wdl'),
+        workflow_template=os.path.join(tempdir.name, 'config.json'),
+        options_template=os.path.join(tempdir.name, 'options.json'),
+        bucket_id=args.workspace.get_bucket_id(),
+        submission_id=submission_id,
+    )
 
-    # print(json.dumps(submission_data, indent='\n'))
+    results = subprocess.run(
+        cmd, shell=True, executable='/bin/bash',
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    ).stdout.decode()
+
+
+    submission_data['operation'] = re.search(
+        r'(operations/\S+)\].',
+        results
+    ).group(1)
 
     data = load_data()
     if 'executions' not in data:
@@ -1180,7 +1199,6 @@ def cmd_exec(args):
 #for submission expression, assume 1+ workflows will be created
 # evaluate {expression}.{root_entity_type}_id to create workflows
 
-@parallelize()
 def get_operation_status(opid):
     return yaml.load(
         StringIO(
@@ -1196,7 +1214,6 @@ def get_operation_status(opid):
         )
     )
 
-@parallelize()
 def abort_operation(opid):
     return subprocess.run(
         'yes | gcloud alpha genomics operations cancel %s' % (
@@ -1216,28 +1233,68 @@ def cmd_finish(args):
         sys.exit("No such submission: "+args.submission)
     submission = data['executions'][args.submission]
 
-    workflow_data = [*status_bar.iter(get_operation_status([
-        wf['operation_id'] for wf in submission['workflows']
-    ]), len(submission['workflows']), prepend="Checking status of %d operations " % len(submission['workflows']))]
-    done = 0
-    for i in range(len(workflow_data)):
-        submission['workflows'][i]['data'] = workflow_data[i]
-        if 'done' in workflow_data[i] and workflow_data[i]['done']:
-            done += 1
 
-    print("Completed ", done,'/',len(submission['workflows']), " workflows", sep='')
+    status = get_operation_status(submission['operation'])
+    done = 'done' in status and status['done']
+
+    print("Submission complete:", done)
 
     if args.status:
+        if done:
+            ws = dalmatian.WorkspaceManager(
+                submission['namespace'],
+                submission['workspace']
+            )
+            workflow_metadata = json.loads(getblob(
+                'gs://{bucket_id}/lapdog-executions/{submission_id}/results/workflows.json'.format(
+                    bucket_id=ws.get_bucket_id(),
+                    submission_id=args.submission
+                )
+            ).download_as_string())
+            mtypes = {
+                'n1-standard-%d'%(2**i): (0.0475*(2**i), 0.01*(2**i)) for i in range(7)
+            }
+            mtypes.update({
+                'n1-highmem-%d'%(2**i): (.0592*(2**i), .0125*(2**i)) for i in range(1,7)
+            })
+            mtypes.update({
+                'n1-highcpu-%d'%(2**i):(.03545*(2**i), .0075*(2**1)) for i in range(1,7)
+            })
+            cost = 0
+            maxTime = 0
+            total = 0
+            for wf in workflow_metadata:
+                for calls in wf['workflow_metadata']['calls'].values():
+                    for call in calls:
+                        if 'end' in call:
+                            delta = datetime.strptime(call['end'].split('.')[0], '%Y-%m-%dT%H:%M:%S') - datetime.strptime(call['start'].split('.')[0], '%Y-%m-%dT%H:%M:%S')
+                            delta = (delta.days*24) + (delta.seconds/3600)
+                            if delta > maxTime:
+                                maxTime = delta
+                            total += delta
+                            if 'jes' in call and 'machineType' in call['jes'] and call['jes']['machineType'].split('/')[-1] in mtypes:
+                                cost += mtypes[call['jes']['machineType'].split('/')[-1]][int('preemptible' in call and call['preemptible'])]*delta
+            cost += mtypes['n1-standard-1'][0] * maxTime
+            print("Total runtime: %0.2f hours" % maxTime)
+            print("Total CPU hours: %0.2f" % total)
+            print("Estimated Cost: $%0.2f" %cost)
         return
     if args.abort:
-        results = [*status_bar.iter(abort_operation([
-            wf['operation_id'] for wf in submission['workflows']
-        ]), len(submission['workflows']), prepend="Aborting workflows... ")]
-        for result, wf in zip(results, submission['workflows']):
-            if result.returncode and not ('done' in wf['data'] and wf['data']['done']):
-                print("Failed to abort:", wf['operation_id'])
+        result = abort_operation(submission['operation'])
+        #If we can successfully place lapdog-submission-id and lapdog-execution-role labels
+        #on worker VMs, then we can run:
+        #gcloud compute instances delte (
+        # gcloud compute instances list --filter="label:lapdog-execution-role=worker AND label:lapdod-submission-id={submission_id}" \
+        # | awk 'NR>1{print $1}'
+        # )
+        #Alternatively, have cromwell_driver write a list of workflow ids to gs://.../workspace/workflows.json
+        #["id",...]
+        #Then abort by getting instances with --filter="label:cromwell-workflow-id=cromwell-{workflow_id}"
+        if result.returncode and not ('done' in status and status['done']):
+            print("Failed to abort:", result.stdout.decode())
+        print("Workflow(s) aborted")
         return
-    if done >= len(submission['workflows']):
+    if done:
         print("All workflows completed. Uploading results...")
         ws = dalmatian.WorkspaceManager(
             submission['namespace'],
@@ -1253,37 +1310,54 @@ def cmd_finish(args):
 
         print("Output template:", output_template)
         output_data = {}
-        for wf in status_bar.iter(submission['workflows']):
-            if 'error' in wf['data']:
-                print("Workflow", wf['workflow_id'], "failed")
-                print("Entity:", wf['workflow_entity'])
-                print("Error:", wf['data']['error'])
+        workflow_metadata = json.loads(getblob(
+            'gs://{bucket_id}/lapdog-executions/{submission_id}/results/workflows.json'.format(
+                bucket_id=ws.get_bucket_id(),
+                submission_id=args.submission
+            )
+        ).download_as_string())
+        # print("WORKFLOW META:", workflow_metadata)
+
+        workflow_metadata = {
+            build_input_key(meta['workflow_metadata']['inputs']):meta
+            for meta in workflow_metadata
+        }
+        submission_workflows = {wf['key']: wf['entity'] for wf in submission['workflows']}
+        for key, entity in status_bar.iter(submission_workflows.items(), prepend="Uploading results... "):
+            if key not in workflow_metadata:
+                print("Entity", entity, "has no output metadata")
+            elif workflow_metadata[key]['workflow_status'] != 'Succeeded':
+                print("Entity", entity, "failed")
+                print("Errors:")
+                for call, calldata in workflow_metadata[key]['workflow_metadata']['calls'].items():
+                    print("Call", call, "failed with error:", get_operation_status(calldata['jobId'])['error'])
             else:
-                output_data = json.loads(getblob(wf['workflow_output']).download_as_string())
+                output_data = workflow_metadata[key]['workflow_output']
                 entity_data = {}
                 for k,v in output_data['outputs'].items():
                     k = output_template[k]
                     if k.startswith('this.'):
                         entity_data[k[5:]] = v
+                # print("Output mapping:", entity_data)
                 ws.update_entity_attributes(
                     submission['workflow_entity_type'],
                     pd.DataFrame(
                         entity_data,
-                        index=[wf['workflow_entity']]
+                        index=[entity]
                     ),
                     quiet=True
                 )
 
-
-    # submission_data = {
-    #     'workflows':[],
-    #     'workspace':args.workspace.workspace,
-    #     'namespace':args.workspace.namespace,
-    #     'config':args.config['name'],
-    #     'entity':args.entity,
-    #     'etype':etype,
-    #     'expression':args.expression[1] if args.expression is not None else None
-    # }
-
 if __name__ == '__main__':
     main()
+
+
+# Lapdog Execution Caveats
+#
+# * For the most part, `lapdog exec` was designed to mimic the same interface as `lapdog run`
+# * There are the following caveats to this process:
+#   * You must add your billing project's service account as a WRITER to any firecloud project you wish to execute on
+#     * Furthermore, you must add the service account as a READER to any firecloud project you wish to read data from
+#     * Mainly, this means that if you want to work on a cloned database, you need WRITER on your database and READER on the parent
+#   * You will be charged for execution (instead of charging the firecloud billing project)
+#   * Each submission incurs an overhead of $0.05/hour to run a non-preemptible cromwell server
