@@ -31,7 +31,8 @@ setup(
     'pytz',
     'firecloud',
     'ipython',
-    'iso8601'
+    'iso8601',
+    'agutil'
     ],
     classifiers = [
         "Programming Language :: Python :: 2",
