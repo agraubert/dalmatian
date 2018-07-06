@@ -12,8 +12,6 @@ import iso8601
 import argparse
 import multiprocessing as mp
 
-from .__about__ import __version__
-
 # Collection of high-level wrapper functions for FireCloud API
 
 
