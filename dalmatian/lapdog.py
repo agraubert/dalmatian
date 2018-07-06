@@ -475,8 +475,8 @@ def cmd_stats(args):
         for sample, row in status.iterrows():
             if row.status != 'Succeeded':
                 print(sample,row.status)
-        print("Runtime:", max(status['time_h']), 'hours')
-        print("CPU time:", sum(status['cpu_hours']), 'hours')
+        print("Total Runtime:", max(status['time_h']), 'hours')
+        print("Total CPU time:", sum(status['cpu_hours']), 'hours')
         print("Estimated cost: $", sum(status.query('est_cost == est_cost')['est_cost']), sep='')
     except AssertionError:
         # raise
@@ -1275,7 +1275,7 @@ def cmd_finish(args):
                             if 'jes' in call and 'machineType' in call['jes'] and call['jes']['machineType'].split('/')[-1] in mtypes:
                                 cost += mtypes[call['jes']['machineType'].split('/')[-1]][int('preemptible' in call and call['preemptible'])]*delta
             cost += mtypes['n1-standard-1'][0] * maxTime
-            print("Total runtime: %0.2f hours" % maxTime)
+            print("Total Runtime: %0.2f hours" % maxTime)
             print("Total CPU hours: %0.2f" % total)
             print("Estimated Cost: $%0.2f" %cost)
         return
